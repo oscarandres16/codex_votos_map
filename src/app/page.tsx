@@ -1,32 +1,22 @@
 "use client";
 
 import type { Voter, VoterPriority, VoterStatus } from "@/lib/voters-store";
+import type { FormMode, FormState } from "@/lib/form-types";
 import type { Map as LeafletMap } from "leaflet";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DiscardModal } from "@/components/modals/DiscardModal";
+import { SearchModal } from "@/components/modals/SearchModal";
+import { VoterModal } from "@/components/modals/VoterModal";
+import { RoutesPanel } from "@/components/panels/RoutesPanel";
+import { VotersPanel } from "@/components/panels/VotersPanel";
+import { MapControls } from "@/components/MapControls";
+import { MapOverlays } from "@/components/MapOverlays";
 
 const MapView = dynamic(
   () => import("@/components/MapView").then((mod) => mod.MapView),
   { ssr: false }
 );
-
-type FormState = {
-  name: string;
-  documentType: string;
-  documentNumber: string;
-  phone: string;
-  email: string;
-  address: string;
-  locationLink: string;
-  neighborhood: string;
-  status: VoterStatus;
-  priority: VoterPriority;
-  support: number;
-  visits: number;
-  lat: number;
-  lng: number;
-  notes: string;
-};
 
 const emptyForm: FormState = {
   name: "",
@@ -102,7 +92,7 @@ const routesStorageKey = "votantes-routes";
   >("Todas");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [showDiscardWarning, setShowDiscardWarning] = useState(false);
-  const [mode, setMode] = useState<"create" | "edit">("create");
+  const [mode, setMode] = useState<FormMode>("create");
   const [form, setForm] = useState<FormState>(emptyForm);
   const [saving, setSaving] = useState(false);
   const [locationLabel, setLocationLabel] = useState("Cargando ubicación");
@@ -135,6 +125,12 @@ const routesStorageKey = "votantes-routes";
   >([]);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [showRoutePanel, setShowRoutePanel] = useState(true);
+  const searchCacheRef = useRef<Map<string, { ts: number; results: {
+    display_name: string;
+    lat: string;
+    lon: string;
+  }[] }>>(new Map());
+  const lastSearchAtRef = useRef(0);
   const readStoredMapState = () => {
     if (typeof window === "undefined") return null;
     const raw = window.localStorage.getItem(storageKey);
@@ -421,18 +417,44 @@ const routesStorageKey = "votantes-routes";
       setSearchError("");
       return;
     }
+    if (normalized.length < 3) {
+      setSearchResults([]);
+      setSearchError("Escribe al menos 3 caracteres.");
+      return;
+    }
+    const now = Date.now();
+    if (now - lastSearchAtRef.current < 800) {
+      setSearchError("Espera un momento e intenta de nuevo.");
+      return;
+    }
+    lastSearchAtRef.current = now;
+    const cached = searchCacheRef.current.get(normalized);
+    if (cached && now - cached.ts < 5 * 60 * 1000) {
+      setSearchResults(cached.results);
+      setSearchError(cached.results.length === 0 ? "Sin resultados." : "");
+      return;
+    }
+    const nominatimEmail = process.env.NEXT_PUBLIC_NOMINATIM_EMAIL;
     setSearching(true);
     setSearchError("");
     searchControllerRef.current?.abort();
     const controller = new AbortController();
     searchControllerRef.current = controller;
     try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(
-          normalized
-        )}&limit=6&accept-language=es`,
-        { signal: controller.signal }
+      const nominatimUrl = new URL(
+        "https://nominatim.openstreetmap.org/search"
       );
+      nominatimUrl.searchParams.set("format", "jsonv2");
+      nominatimUrl.searchParams.set("q", normalized);
+      nominatimUrl.searchParams.set("limit", "6");
+      nominatimUrl.searchParams.set("accept-language", "es");
+      if (nominatimEmail) {
+        nominatimUrl.searchParams.set("email", nominatimEmail);
+      }
+
+      const response = await fetch(nominatimUrl.toString(), {
+        signal: controller.signal,
+      });
       if (!response.ok) throw new Error("search failed");
       const data = (await response.json()) as {
         display_name: string;
@@ -440,12 +462,57 @@ const routesStorageKey = "votantes-routes";
         lon: string;
       }[];
       setSearchResults(data);
+      searchCacheRef.current.set(normalized, { ts: now, results: data });
       if (data.length === 0) {
         setSearchError("Sin resultados.");
       }
     } catch (err) {
       if ((err as { name?: string }).name !== "AbortError") {
-        setSearchError("Error buscando el lugar.");
+        try {
+          const fallback = await fetch(
+            `https://photon.komoot.io/api/?q=${encodeURIComponent(
+              normalized
+            )}&limit=6&lang=es`,
+            { signal: controller.signal }
+          );
+          if (!fallback.ok) throw new Error("fallback failed");
+          const data = (await fallback.json()) as {
+            features?: {
+              geometry?: { coordinates?: [number, number] };
+              properties?: {
+                name?: string;
+                city?: string;
+                state?: string;
+                country?: string;
+              };
+            }[];
+          };
+          const results =
+            data.features?.map((feature) => {
+              const [lon, lat] = feature.geometry?.coordinates ?? [0, 0];
+              const props = feature.properties ?? {};
+              const label = [
+                props.name,
+                props.city,
+                props.state,
+                props.country,
+              ]
+                .filter(Boolean)
+                .join(", ");
+              return {
+                display_name: label || "Ubicación",
+                lat: String(lat),
+                lon: String(lon),
+              };
+            }) ?? [];
+          setSearchResults(results);
+          searchCacheRef.current.set(normalized, { ts: now, results });
+          if (results.length === 0) {
+            setSearchError("Sin resultados.");
+          }
+        } catch {
+          setSearchError("Error buscando el lugar.");
+        }
       }
     } finally {
       setSearching(false);
@@ -485,19 +552,10 @@ const routesStorageKey = "votantes-routes";
   };
 
   useEffect(() => {
-    if (!isSearchOpen) return;
-    const term = searchQuery.trim();
-    if (!term) {
-      setSearchResults([]);
-      setSearchError("");
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      handleSearch(term);
-    }, 300);
-
-    return () => window.clearTimeout(timeout);
-  }, [isSearchOpen, searchQuery]);
+    if (isSearchOpen) return;
+    setSearchResults([]);
+    setSearchError("");
+  }, [isSearchOpen]);
 
   useEffect(() => {
     if (!isModalOpen) return;
@@ -774,1108 +832,129 @@ const routesStorageKey = "votantes-routes";
         />
 
       </div>
-      {showRoutePanel ? (
-        <div className="pointer-events-auto absolute top-6 right-6 z-40 w-[320px] rounded-3xl border border-white/10 bg-[var(--panel-strong)]/95 p-4 text-sm text-white shadow-2xl">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-[10px] uppercase text-white/40 tracking-[0.35em]">
-                Rutas de visita
-              </p>
-              <p className="text-lg font-semibold">Orden actual</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={clearRoute}
-                className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/40"
-              >
-                Limpiar
-              </button>
-              <button
-                onClick={() => setShowRoutePanel(false)}
-                className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/40"
-              >
-                Ocultar
-              </button>
-            </div>
-          </div>
-          <div className="mt-3 max-h-[60vh] space-y-2 overflow-y-auto pr-1">
-            {routeStopVoters.length === 0 ? (
-              <p className="rounded-2xl border border-dashed border-white/20 bg-white/5 px-3 py-2 text-xs text-white/50">
-                Agrega votantes para trazar la ruta
-              </p>
-            ) : (
-              routeStopVoters.map((voter, index) => (
-                <div
-                  key={voter.id}
-                  draggable
-                  onDragStart={() => setDraggingId(voter.id)}
-                  onDragEnd={() => setDraggingId(null)}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={() => handleDropOnRoute(voter.id)}
-                  className="flex items-start justify-between rounded-2xl border border-white/10 bg-white/5 px-3 py-2 hover:cursor-grab"
-                >
-                  <div className="mr-3 flex h-8 w-2 items-center justify-center">
-                    <div className="h-2 w-full rounded-full bg-white/50" />
-                    <div className="mt-1 h-2 w-full rounded-full bg-white/50" />
-                  </div>
-                  <div className="flex-1 text-left">
-                    <p className="text-[12px] font-semibold">
-                      {index + 1}. {voter.name}
-                    </p>
-                    <p className="text-[11px] text-white/60">
-                      {voter.neighborhood}
-                    </p>
-                  </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <div className="flex gap-1">
-                      <button
-                        onClick={() => moveRouteStop(voter.id, "up")}
-                        disabled={index === 0}
-                        className="rounded-full border border-white/10 px-2 text-[10px] text-white/50 disabled:text-white/20"
-                      >
-                        ↑
-                      </button>
-                      <button
-                        onClick={() => moveRouteStop(voter.id, "down")}
-                        disabled={index === routeStopVoters.length - 1}
-                        className="rounded-full border border-white/10 px-2 text-[10px] text-white/50 disabled:text-white/20"
-                      >
-                        ↓
-                      </button>
-                    </div>
-                    <button
-                      onClick={() => removeRouteStop(voter.id)}
-                      className="rounded-full border border-rose-400/40 px-2 text-[10px] text-rose-200"
-                    >
-                      Eliminar
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-          <div className="mt-4 space-y-2">
-            <button
-              onClick={() => addRouteStop(selectedId ?? "")}
-              disabled={!selectedId || routeStops.includes(selectedId)}
-              className="w-full rounded-full border border-white/10 bg-emerald-500/10 px-3 py-2 text-[11px] font-semibold text-emerald-100 transition hover:bg-emerald-500/20 disabled:opacity-50"
-            >
-              Agregar votante seleccionado
-            </button>
-            <div className="flex flex-col gap-2">
-              <div className="flex gap-2">
-                <input
-                  value={routeCandidate}
-                  onChange={(event) => setRouteCandidate(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      if (routeCandidate && !routeStops.includes(routeCandidate)) {
-                        addRouteStop(routeCandidate);
-                        setRouteCandidate("");
-                      }
-                    }
-                  }}
-                  className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:border-emerald-400/60 focus:outline-none"
-                  placeholder="Busca por nombre o barrio"
-                />
-                <button
-                  onClick={() => {
-                    if (routeCandidate && !routeStops.includes(routeCandidate)) {
-                      addRouteStop(routeCandidate);
-                      setRouteCandidate("");
-                    }
-                  }}
-                  disabled={!routeCandidate || routeStops.includes(routeCandidate)}
-                  className="rounded-full border border-white/10 px-3 py-2 text-[11px] text-white/70 hover:border-white/40 disabled:opacity-50"
-                >
-                  Agregar
-                </button>
-              </div>
-              {routeSuggestions.length > 0 ? (
-                <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white/70">
-                  {routeSuggestions.map((voter) => (
-                    <button
-                      key={voter.id}
-                      onClick={() => {
-                        addRouteStop(voter.id);
-                        setRouteCandidate("");
-                      }}
-                      className="w-full text-left hover:text-white"
-                    >
-                      {voter.name} · {voter.neighborhood}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <input
-                value={routeName}
-                onChange={(event) => setRouteName(event.target.value)}
-                placeholder="Nombre de la ruta"
-                className="col-span-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:border-emerald-400/60 focus:outline-none"
-              />
-              <input
-                type="date"
-                value={routeDate}
-                onChange={(event) => setRouteDate(event.target.value)}
-                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:border-emerald-400/60 focus:outline-none"
-              />
-              <input
-                type="time"
-                value={routeTime}
-                onChange={(event) => setRouteTime(event.target.value)}
-                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:border-emerald-400/60 focus:outline-none"
-              />
-              <button
-                onClick={saveCurrentRoute}
-                disabled={routeStops.length === 0}
-                className="rounded-full border border-white/10 bg-emerald-500/10 px-3 py-2 text-[11px] font-semibold text-emerald-100 transition hover:bg-emerald-500/20 disabled:opacity-50"
-              >
-                Guardar ruta
-              </button>
-            </div>
-            {savedRoutes.length > 0 ? (
-              <div className="space-y-2">
-                <p className="text-[11px] uppercase text-white/40 tracking-[0.3em]">
-                  Rutas guardadas
-                </p>
-                {savedRoutes.map((route) => (
-                  <div
-                    key={route.id}
-                    className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white"
-                  >
-                    <div>
-                      <p className="font-semibold">{route.name}</p>
-                      <p className="text-white/60">
-                        {route.date ?? "Fecha sin asignar"} ·{" "}
-                        {route.time ?? "Hora sin asignar"}
-                      </p>
-                    </div>
-                    <div className="flex flex-col items-end gap-1 text-white/50">
-                      <button
-                        onClick={() => loadSavedRoute(route.id)}
-                        className="text-[10px] hover:text-white"
-                      >
-                        Cargar
-                      </button>
-                      <button
-                        onClick={() => deleteSavedRoute(route.id)}
-                        className="text-[10px] text-rose-200 hover:text-white"
-                      >
-                        Borrar
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : (
-        <button
-          onClick={() => setShowRoutePanel(true)}
-          className="pointer-events-auto absolute top-6 right-6 z-40 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white shadow-xl backdrop-blur"
-        >
-          Mostrar rutas
-        </button>
-      )}
+      <RoutesPanel
+        isOpen={showRoutePanel}
+        onShow={() => setShowRoutePanel(true)}
+        onHide={() => setShowRoutePanel(false)}
+        routeStopVoters={routeStopVoters}
+        routeStops={routeStops}
+        selectedId={selectedId}
+        routeCandidate={routeCandidate}
+        setRouteCandidate={setRouteCandidate}
+        routeSuggestions={routeSuggestions}
+        routeName={routeName}
+        setRouteName={setRouteName}
+        routeDate={routeDate}
+        setRouteDate={setRouteDate}
+        routeTime={routeTime}
+        setRouteTime={setRouteTime}
+        savedRoutes={savedRoutes}
+        addRouteStop={addRouteStop}
+        moveRouteStop={moveRouteStop}
+        removeRouteStop={removeRouteStop}
+        clearRoute={clearRoute}
+        saveCurrentRoute={saveCurrentRoute}
+        loadSavedRoute={loadSavedRoute}
+        deleteSavedRoute={deleteSavedRoute}
+        onDragStart={(id) => setDraggingId(id)}
+        onDragEnd={() => setDraggingId(null)}
+        onDropOnRoute={handleDropOnRoute}
+      />
 
       <div className="relative z-10 flex min-h-screen flex-col lg:flex-row pointer-events-none">
-        <aside className="panel-scroll pointer-events-auto w-full max-w-full shrink-0 border-b border-white/10 bg-[var(--panel)]/95 p-6 backdrop-blur-xl lg:w-[360px] lg:border-b-0 lg:border-r lg:rounded-r-[28px]">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-xs uppercase tracking-[0.3em] text-emerald-200/70">
-                Panel de campo
-              </p>
-              <h1 className="font-[var(--font-display)] text-2xl text-white">
-                Votantes activos
-              </h1>
-            </div>
-            <button
-              onClick={openCreate}
-              className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-500/20"
-            >
-              Nuevo votante
-            </button>
-          </div>
-
-          <div className="mt-6 space-y-3">
-            <div className="flex items-center gap-3 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/70">
-              <span className="text-emerald-200">⌕</span>
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                className="w-full bg-transparent text-sm text-white placeholder:text-white/40 focus:outline-none"
-                placeholder="Buscar votante, barrio o ID"
-              />
-            </div>
-            <div className="flex flex-wrap gap-2 text-xs">
-              {(
-                [
-                  { label: `Todos ${stats.total}`, value: "Todas" },
-                  { label: `Confirmados ${stats.confirmed}`, value: "Confirmado" },
-                  { label: `Pendientes ${stats.pending}`, value: "Pendiente" },
-                  { label: `En revisión ${stats.review}`, value: "En revisión" },
-                ] as const
-              ).map((tag) => (
-                <button
-                  key={tag.value}
-                  onClick={() => setStatusFilter(tag.value)}
-                  className={`rounded-full border px-3 py-1 transition ${
-                    statusFilter === tag.value
-                      ? "border-emerald-400/70 bg-emerald-500/20 text-emerald-100"
-                      : "border-white/10 bg-white/5 text-white/60 hover:border-white/30"
-                  }`}
-                >
-                  {tag.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="mt-6 space-y-3">
-            {loading ? (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/60">
-                Cargando votantes...
-              </div>
-            ) : filteredVoters.length === 0 ? (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/60">
-                No hay votantes para este filtro.
-              </div>
-            ) : (
-              filteredVoters.map((voter) => {
-                const isSelected = voter.id === selectedId;
-                return (
-                  <button
-                    key={voter.id}
-                    onClick={() => handleSelect(voter.id)}
-                    className={`w-full rounded-2xl border px-4 py-3 text-left transition ${
-                      isSelected
-                        ? "border-emerald-400/70 bg-emerald-500/10"
-                        : "border-white/10 bg-white/5 hover:border-white/30"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <p className="text-sm font-semibold text-white">
-                          {voter.name}
-                        </p>
-                        <p className="text-xs text-white/50">
-                          {voter.neighborhood}
-                        </p>
-                      </div>
-                      <span
-                        className={`rounded-full border px-2 py-1 text-[10px] ${
-                          statusStyles[voter.status]
-                        }`}
-                      >
-                        {voter.status}
-                      </span>
-                    </div>
-                    <div className="mt-3 flex items-center justify-between text-xs text-white/60">
-                      <span className={priorityStyles[voter.priority]}>
-                        Prioridad {voter.priority}
-                      </span>
-                      <span>{voter.support}% afinidad</span>
-                    </div>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </aside>
+        <VotersPanel
+          search={search}
+          onSearchChange={setSearch}
+          statusFilter={statusFilter}
+          onStatusFilterChange={setStatusFilter}
+          stats={stats}
+          loading={loading}
+          voters={filteredVoters}
+          selectedId={selectedId}
+          onSelect={handleSelect}
+          onCreate={openCreate}
+          statusStyles={statusStyles}
+          priorityStyles={priorityStyles}
+        />
 
         <main className="relative flex-1 pointer-events-none">
           <div className="relative h-full min-h-[620px]">
-            {!selected ? (
-              <div className="absolute left-6 top-6 rounded-2xl border border-white/10 bg-[var(--panel-strong)]/95 p-5 text-sm text-white/70 pointer-events-auto">
-                Selecciona un votante en la lista o en el mapa.
-              </div>
-            ) : null}
-
-            <div className="absolute bottom-6 right-6 flex flex-col gap-3 pointer-events-auto">
-              {[
+            <MapOverlays
+              selectedId={selectedId}
+              stats={[
                 { label: "Total activos", value: stats.total },
                 { label: "Confirmados", value: stats.confirmed },
-              ].map((stat) => (
-                <div
-                  key={stat.label}
-                  className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white/70 backdrop-blur"
-                >
-                  <p className="text-xs uppercase text-white/40">{stat.label}</p>
-                  <p className="text-lg font-semibold text-white">{stat.value}</p>
-                </div>
-              ))}
-            </div>
+              ]}
+              locationLabel={locationLabel}
+              locationDetail={locationDetail}
+              pickMode={pickMode}
+            />
 
-            <div className="absolute bottom-6 left-6 rounded-2xl border border-white/10 bg-white/10 px-4 py-3 text-sm text-white/70 backdrop-blur pointer-events-auto">
-              <p className="text-xs uppercase text-white/40">
-                Ubicación actual
-              </p>
-              <p className="text-lg font-semibold text-white">
-                {locationLabel}
-              </p>
-              {locationDetail ? (
-                <p className="text-xs text-white/50">{locationDetail}</p>
-              ) : null}
-            </div>
-
-            {pickMode ? (
-              <div className="absolute left-1/2 top-6 -translate-x-1/2 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-xs text-emerald-100 backdrop-blur pointer-events-auto">
-                Haz click en el mapa para seleccionar la ubicación. Esc para salir.
-              </div>
-            ) : null}
-
-            <div className="pointer-events-auto absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full border border-white/10 bg-[var(--panel-strong)]/90 px-3 py-2 text-xs text-white/70 shadow-xl backdrop-blur">
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleLocate}
-                  disabled={locating}
-                  className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 text-sm text-white/70 hover:border-white/40 disabled:opacity-60"
-                  aria-label="Ir a mi ubicación"
-                  title="Mi ubicación (L)"
-                >
-                  <svg
-                    className="h-4 w-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.6"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                  >
-                    <circle cx="12" cy="12" r="3.2" />
-                    <path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22" />
-                  </svg>
-                </button>
-                <button
-                  onClick={() => {
-                    setIsSearchOpen(true);
-                    setSearchQuery("");
-                    setSearchResults([]);
-                    setSearchError("");
-                  }}
-                  className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 text-sm text-white/70 hover:border-white/40"
-                  aria-label="Buscar ubicación"
-                  title="Buscar ubicación (S)"
-                >
-                  <svg
-                    className="h-4 w-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.6"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                  >
-                    <circle cx="11" cy="11" r="6.5" />
-                    <path d="M16.2 16.2 21 21" />
-                  </svg>
-                </button>
-                <button
-                  onClick={() => setInteractionEnabled((prev) => !prev)}
-                  className={`rounded-full px-3 py-1 text-[11px] font-semibold transition ${
-                    interactionEnabled
-                      ? "bg-emerald-400/20 text-emerald-100"
-                      : "bg-white/10 text-white/60"
-                  }`}
-                  title="Arrastrar mapa (N)"
-                >
-                  <span className="inline-flex items-center gap-2">
-                    <svg
-                      className="h-4 w-4"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M7 12V6a1 1 0 0 1 2 0v6" />
-                      <path d="M11 12V5a1 1 0 0 1 2 0v7" />
-                      <path d="M15 12V6a1 1 0 0 1 2 0v8" />
-                      <path d="M19 13V9a1 1 0 0 1 2 0v6" />
-                      <path d="M3 14l4.5 4.5a4 4 0 0 0 2.83 1.17h3.34a4 4 0 0 0 3.2-1.6l2.13-2.84" />
-                    </svg>
-                    {interactionEnabled ? "Arrastrar activo" : "Arrastrar"}
-                  </span>
-                </button>
-                <div className="relative">
-                  <button
-                    onClick={() => setIsMapMenuOpen((prev) => !prev)}
-                    className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/40"
-                    title="Cambiar mapa (M)"
-                    aria-expanded={isMapMenuOpen}
-                  >
-                    Mapa: {activeMapLayer.label}
-                  </button>
-                  {isMapMenuOpen ? (
-                    <div className="absolute bottom-10 left-1/2 z-10 w-44 -translate-x-1/2 rounded-2xl border border-white/10 bg-[var(--panel-strong)]/95 p-2 text-[11px] text-white/70 shadow-xl backdrop-blur">
-                      {mapLayers.map((layer, index) => (
-                        <button
-                          key={layer.id}
-                          onClick={() => {
-                            setMapLayerIndex(index);
-                            setIsMapMenuOpen(false);
-                          }}
-                          className={`w-full rounded-xl px-3 py-2 text-left transition ${
-                            index === mapLayerIndex
-                              ? "bg-emerald-400/20 text-emerald-100"
-                              : "hover:bg-white/10"
-                          }`}
-                        >
-                          {layer.label}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-                <button
-                  onClick={handleZoomOut}
-                  className="h-7 w-7 rounded-full border border-white/10 text-sm text-white/70 hover:border-white/40"
-                  title="Alejar (−)"
-                >
-                  −
-                </button>
-                <button
-                  onClick={handleZoomIn}
-                  className="h-7 w-7 rounded-full border border-white/10 text-sm text-white/70 hover:border-white/40"
-                  title="Acercar (+)"
-                >
-                  +
-                </button>
-              </div>
-              <div className="mt-2 flex items-center justify-center gap-2 text-[10px] uppercase text-white/40">
-                <span>Atajos:</span>
-                <span>L</span>
-                <span>S</span>
-                <span>N</span>
-                <span>M</span>
-                <span>-</span>
-                <span>+</span>
-              </div>
-            </div>
+            <MapControls
+              interactionEnabled={interactionEnabled}
+              onToggleInteraction={() => setInteractionEnabled((prev) => !prev)}
+              onSearchOpen={() => {
+                setIsSearchOpen(true);
+                setSearchQuery("");
+                setSearchResults([]);
+                setSearchError("");
+              }}
+              onLocate={handleLocate}
+              locating={locating}
+              isMapMenuOpen={isMapMenuOpen}
+              onToggleMapMenu={() => setIsMapMenuOpen((prev) => !prev)}
+              mapLayers={mapLayers}
+              mapLayerIndex={mapLayerIndex}
+              onSelectMapLayer={(index) => {
+                setMapLayerIndex(index);
+                setIsMapMenuOpen(false);
+              }}
+              onZoomOut={handleZoomOut}
+              onZoomIn={handleZoomIn}
+            />
           </div>
         </main>
       </div>
 
-      {showRoutePanel ? (
-      <div className="pointer-events-auto absolute top-6 right-6 z-40 w-[320px] rounded-3xl border border-white/10 bg-[var(--panel-strong)]/95 p-4 text-sm text-white shadow-2xl">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-[10px] uppercase text-white/40 tracking-[0.35em]">
-                Rutas de visita
-              </p>
-              <p className="text-lg font-semibold">Orden actual</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={clearRoute}
-                className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/40"
-              >
-                Limpiar
-              </button>
-              <button
-                onClick={() => setShowRoutePanel(false)}
-                className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/40"
-              >
-                Ocultar
-              </button>
-            </div>
-          </div>
-        <div className="mt-3 max-h-[60vh] space-y-2 overflow-y-auto pr-1">
-          {routeStopVoters.length === 0 ? (
-            <p className="rounded-2xl border border-dashed border-white/20 bg-white/5 px-3 py-2 text-xs text-white/50">
-              Agrega votantes para trazar la ruta
-            </p>
-          ) : (
-              routeStopVoters.map((voter, index) => (
-                <div
-                  key={voter.id}
-                  draggable
-                  onDragStart={() => setDraggingId(voter.id)}
-                  onDragEnd={() => setDraggingId(null)}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={() => handleDropOnRoute(voter.id)}
-                  className="flex items-start justify-between rounded-2xl border border-white/10 bg-white/5 px-3 py-2 hover:cursor-grab"
-                >
-                  <div className="mr-3 flex h-8 w-2 items-center justify-center">
-                    <div className="h-2 w-full rounded-full bg-white/50" />
-                    <div className="mt-1 h-2 w-full rounded-full bg-white/50" />
-                  </div>
-                  <div className="flex-1 text-left">
-                    <p className="text-[12px] font-semibold">
-                      {index + 1}. {voter.name}
-                    </p>
-                    <p className="text-[11px] text-white/60">
-                      {voter.neighborhood}
-                    </p>
-                  </div>
-                  <div className="flex flex-col items-end gap-1">
-                  <div className="flex gap-1">
-                    <button
-                      onClick={() => moveRouteStop(voter.id, "up")}
-                      disabled={index === 0}
-                      className="rounded-full border border-white/10 px-2 text-[10px] text-white/50 disabled:text-white/20"
-                    >
-                      ↑
-                    </button>
-                    <button
-                      onClick={() => moveRouteStop(voter.id, "down")}
-                      disabled={index === routeStopVoters.length - 1}
-                      className="rounded-full border border-white/10 px-2 text-[10px] text-white/50 disabled:text-white/20"
-                    >
-                      ↓
-                    </button>
-                  </div>
-                  <button
-                    onClick={() => removeRouteStop(voter.id)}
-                    className="rounded-full border border-rose-400/40 px-2 text-[10px] text-rose-200"
-                  >
-                    Eliminar
-                  </button>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-        <div className="mt-4 space-y-2">
-          <button
-            onClick={() => addRouteStop(selectedId ?? "")}
-            disabled={!selectedId || routeStops.includes(selectedId)}
-            className="w-full rounded-full border border-white/10 bg-emerald-500/10 px-3 py-2 text-[11px] font-semibold text-emerald-100 transition hover:bg-emerald-500/20 disabled:opacity-50"
-          >
-            Agregar votante seleccionado
-          </button>
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2">
-              <input
-                value={routeCandidate}
-                onChange={(event) => setRouteCandidate(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    if (routeCandidate && !routeStops.includes(routeCandidate)) {
-                      addRouteStop(routeCandidate);
-                      setRouteCandidate("");
-                    }
-                  }
-                }}
-                className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:border-emerald-400/60 focus:outline-none"
-                placeholder="Busca por nombre o barrio"
-              />
-              <button
-                onClick={() => {
-                  if (routeCandidate && !routeStops.includes(routeCandidate)) {
-                    addRouteStop(routeCandidate);
-                    setRouteCandidate("");
-                  }
-                }}
-                disabled={!routeCandidate || routeStops.includes(routeCandidate)}
-                className="rounded-full border border-white/10 px-3 py-2 text-[11px] text-white/70 hover:border-white/40 disabled:opacity-50"
-              >
-                Agregar
-              </button>
-            </div>
-            {routeSuggestions.length > 0 ? (
-              <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white/70">
-                {routeSuggestions.map((voter) => (
-                  <button
-                    key={voter.id}
-                    onClick={() => {
-                      addRouteStop(voter.id);
-                      setRouteCandidate("");
-                    }}
-                    className="w-full text-left hover:text-white"
-                  >
-                    {voter.name} · {voter.neighborhood}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            <input
-              value={routeName}
-              onChange={(event) => setRouteName(event.target.value)}
-              placeholder="Nombre de la ruta"
-              className="col-span-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:border-emerald-400/60 focus:outline-none"
-            />
-            <input
-              type="date"
-              value={routeDate}
-              onChange={(event) => setRouteDate(event.target.value)}
-              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:border-emerald-400/60 focus:outline-none"
-            />
-            <input
-              type="time"
-              value={routeTime}
-              onChange={(event) => setRouteTime(event.target.value)}
-              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:border-emerald-400/60 focus:outline-none"
-            />
-            <button
-              onClick={saveCurrentRoute}
-              disabled={routeStops.length === 0}
-              className="rounded-full border border-white/10 bg-emerald-500/10 px-3 py-2 text-[11px] font-semibold text-emerald-100 transition hover:bg-emerald-500/20 disabled:opacity-50"
-            >
-              Guardar ruta
-            </button>
-          </div>
-          {savedRoutes.length > 0 ? (
-            <div className="space-y-2">
-              <p className="text-[11px] uppercase text-white/40 tracking-[0.3em]">
-                Rutas guardadas
-              </p>
-              {savedRoutes.map((route) => (
-                <div
-                  key={route.id}
-                  className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white"
-                >
-                  <div>
-                    <p className="font-semibold">{route.name}</p>
-                    <p className="text-white/60">
-                      {route.date ?? "Fecha sin asignar"} ·{" "}
-                      {route.time ?? "Hora sin asignar"}
-                    </p>
-                  </div>
-                  <div className="flex flex-col items-end gap-1 text-white/50">
-                    <button
-                      onClick={() => loadSavedRoute(route.id)}
-                      className="text-[10px] hover:text-white"
-                    >
-                      Cargar
-                    </button>
-                    <button
-                      onClick={() => deleteSavedRoute(route.id)}
-                      className="text-[10px] text-rose-200 hover:text-white"
-                    >
-                      Borrar
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </div>
-      ) : null}
-      {isSearchOpen ? (
-        <div
-          className="fixed inset-0 z-30 flex items-center justify-center bg-black/70 backdrop-blur"
-          onClick={() => setIsSearchOpen(false)}
-        >
-          <div className="w-full max-w-xl px-6">
-            <div
-              className="rounded-3xl border border-white/10 bg-[var(--panel-strong)]/95 p-4 shadow-2xl"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="flex items-center gap-3 rounded-full border border-white/10 bg-white/5 px-4 py-3">
-                <svg
-                  className="h-4 w-4 text-emerald-200"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <circle cx="11" cy="11" r="6.5" />
-                  <path d="M16.2 16.2 21 21" />
-                </svg>
-                <input
-                  autoFocus
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      handleSearch(searchQuery);
-                    }
-                    if (event.key === "Escape") {
-                      setIsSearchOpen(false);
-                    }
-                  }}
-                  className="w-full bg-transparent text-sm text-white placeholder:text-white/40 focus:outline-none"
-                  placeholder="Buscar municipio o ciudad"
-                />
-                <button
-                  onClick={() => handleSearch(searchQuery)}
-                  disabled={searching}
-                  className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/30 disabled:opacity-60"
-                >
-                  {searching ? "..." : "Buscar"}
-                </button>
-              </div>
-              {searchError ? (
-                <p className="mt-3 text-xs text-rose-200">{searchError}</p>
-              ) : null}
-              {searchResults.length > 0 ? (
-                <div className="mt-3 max-h-64 overflow-auto rounded-2xl border border-white/10 bg-white/5">
-                  {searchResults.map((result) => (
-                    <button
-                      key={`${result.lat}-${result.lon}-${result.display_name}`}
-                      onClick={() => handleSelectResult(result)}
-                    className="w-full px-4 py-3 text-left text-xs text-white/70 hover:bg-white/10"
-                    >
-                      {result.display_name}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-              <div className="mt-3 flex justify-end">
-                <button
-                  onClick={() => setIsSearchOpen(false)}
-                  className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/60 hover:border-white/30"
-                >
-                  Cerrar
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
-      {isModalOpen ? (
-        <div className="fixed inset-0 z-20 flex items-center justify-center bg-black/60 p-6">
-          <div className="w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-3xl border border-white/10 bg-[var(--panel-strong)]/95 p-6 shadow-2xl">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-xs uppercase tracking-[0.3em] text-emerald-200/70">
-                  {mode === "create" ? "Nuevo votante" : "Editar votante"}
-                </p>
-                <h3 className="font-[var(--font-display)] text-xl text-white">
-                  Información principal
-                </h3>
-              </div>
-              <button
-                onClick={requestCloseModal}
-                className="rounded-full border border-white/10 px-3 py-1 text-xs text-white/70"
-              >
-                Cerrar
-              </button>
-            </div>
+      <SearchModal
+        isOpen={isSearchOpen}
+        query={searchQuery}
+        onQueryChange={setSearchQuery}
+        onSearch={handleSearch}
+        searching={searching}
+        error={searchError}
+        results={searchResults}
+        onSelectResult={handleSelectResult}
+        onClose={() => setIsSearchOpen(false)}
+      />
 
-            <div className="modal-scroll mt-5 max-h-[calc(85vh-190px)] overflow-y-auto pr-3">
-              <div className="space-y-5">
-              <div className="space-y-3">
-                <p className="text-[11px] uppercase tracking-[0.35em] text-white/40">
-                  Identificación
-                </p>
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <label className="text-xs text-white/60 md:col-span-2">
-                    Nombre completo
-                    <input
-                      value={form.name}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          name: event.target.value,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="text-xs text-white/60">
-                    Tipo de documento
-                    <select
-                      value={form.documentType}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          documentType: event.target.value,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    >
-                      <option className="text-black" value="Cédula de ciudadanía">
-                        Cédula de ciudadanía
-                      </option>
-                      <option className="text-black" value="Cédula de extranjería">
-                        Cédula de extranjería
-                      </option>
-                      <option className="text-black" value="Pasaporte">
-                        Pasaporte
-                      </option>
-                      <option className="text-black" value="Tarjeta de identidad">
-                        Tarjeta de identidad
-                      </option>
-                    </select>
-                  </label>
-                  <label className="text-xs text-white/60">
-                    Número de documento
-                    <input
-                      value={form.documentNumber}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          documentNumber: event.target.value,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                </div>
-              </div>
+      <VoterModal
+        isOpen={isModalOpen}
+        mode={mode}
+        form={form}
+        setForm={setForm}
+        requestCloseModal={requestCloseModal}
+        applyLocationLink={applyLocationLink}
+        locationLinkError={locationLinkError}
+        onPickLocationMode={() => {
+          setIsModalOpen(false);
+          setPickMode(true);
+        }}
+        onSubmit={handleSubmit}
+        saving={saving}
+      />
 
-              <div className="space-y-3">
-                <p className="text-[11px] uppercase tracking-[0.35em] text-white/40">
-                  Contacto
-                </p>
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <label className="text-xs text-white/60">
-                    Teléfono
-                    <input
-                      type="tel"
-                      value={form.phone}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          phone: event.target.value,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="text-xs text-white/60">
-                    Correo (opcional)
-                    <input
-                      type="email"
-                      value={form.email}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          email: event.target.value,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="text-xs text-white/60 md:col-span-2">
-                    Dirección
-                    <input
-                      value={form.address}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          address: event.target.value,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="text-xs text-white/60">
-                    Barrio
-                    <input
-                      value={form.neighborhood}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          neighborhood: event.target.value,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="text-xs text-white/60 md:col-span-2">
-                    Enlace de Google Maps (opcional)
-                    <div className="mt-2 flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-                      <input
-                        value={form.locationLink}
-                        onChange={(event) =>
-                          setForm((prev) => ({
-                            ...prev,
-                            locationLink: event.target.value,
-                          }))
-                        }
-                        onBlur={(event) => applyLocationLink(event.target.value)}
-                        className="w-full bg-transparent text-sm text-white focus:outline-none"
-                        placeholder="https://maps.google.com/..."
-                      />
-                      <button
-                        type="button"
-                        onClick={() => applyLocationLink(form.locationLink)}
-                        className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/30"
-                      >
-                        Usar
-                      </button>
-                    </div>
-                    {locationLinkError ? (
-                      <p className="mt-2 text-[11px] text-rose-200">
-                        {locationLinkError}
-                      </p>
-                    ) : null}
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-white/50">
-                      <span>
-                        Coordenadas actuales: {form.lat.toFixed(4)},{" "}
-                        {form.lng.toFixed(4)}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsModalOpen(false);
-                          setPickMode(true);
-                        }}
-                        className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-[11px] text-emerald-100 hover:bg-emerald-500/20"
-                      >
-                        Seleccionar en mapa
-                      </button>
-                    </div>
-                  </label>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <p className="text-[11px] uppercase tracking-[0.35em] text-white/40">
-                  Gestión
-                </p>
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <label className="text-xs text-white/60">
-                    Estado
-                    <select
-                      value={form.status}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          status: event.target.value as VoterStatus,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    >
-                      <option className="text-black" value="Confirmado">
-                        Confirmado
-                      </option>
-                      <option className="text-black" value="Pendiente">
-                        Pendiente
-                      </option>
-                      <option className="text-black" value="En revisión">
-                        En revisión
-                      </option>
-                    </select>
-                  </label>
-                  <label className="text-xs text-white/60">
-                    Prioridad
-                    <select
-                      value={form.priority}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          priority: event.target.value as VoterPriority,
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    >
-                      <option className="text-black" value="Alta">
-                        Alta
-                      </option>
-                      <option className="text-black" value="Media">
-                        Media
-                      </option>
-                      <option className="text-black" value="Baja">
-                        Baja
-                      </option>
-                    </select>
-                  </label>
-                  <label className="text-xs text-white/60">
-                    Afinidad (%)
-                    <input
-                      type="number"
-                      value={form.support}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          support: Number(event.target.value),
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="text-xs text-white/60">
-                    Visitas
-                    <input
-                      type="number"
-                      value={form.visits}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          visits: Number(event.target.value),
-                        }))
-                      }
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="text-xs text-white/60 md:col-span-2">
-                    Notas
-                    <textarea
-                      value={form.notes}
-                      onChange={(event) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          notes: event.target.value,
-                        }))
-                      }
-                      rows={3}
-                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
-                    />
-                  </label>
-                </div>
-              </div>
-              </div>
-            </div>
-
-            <div className="-mx-6 mt-5 flex justify-end gap-2 border-t border-white/10 bg-[var(--panel-strong)]/95 px-6 py-4">
-              <button
-                onClick={requestCloseModal}
-                className="rounded-full border border-white/10 px-4 py-2 text-sm text-white/70"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={handleSubmit}
-                disabled={saving}
-                className="rounded-full bg-emerald-400/20 px-5 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/30 disabled:opacity-60"
-              >
-                {saving ? "Guardando..." : "Guardar"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {showDiscardWarning ? (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/70 p-6">
-          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[var(--panel-strong)]/95 p-5 text-white shadow-2xl">
-            <h4 className="text-lg font-semibold">¿Descartar cambios?</h4>
-            <p className="mt-2 text-sm text-white/70">
-              Tienes cambios sin guardar. Si cierras ahora, se perderán.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setShowDiscardWarning(false)}
-                className="rounded-full border border-white/10 px-4 py-2 text-sm text-white/70"
-              >
-                Seguir editando
-              </button>
-              <button
-                onClick={() => {
-                  setShowDiscardWarning(false);
-                  setIsModalOpen(false);
-                  setPickMode(false);
-                  setIsFormDirty(false);
-                }}
-                className="rounded-full bg-rose-500/20 px-4 py-2 text-sm font-semibold text-rose-100"
-              >
-                Descartar
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <DiscardModal
+        isOpen={showDiscardWarning}
+        onKeepEditing={() => setShowDiscardWarning(false)}
+        onDiscard={() => {
+          setShowDiscardWarning(false);
+          setIsModalOpen(false);
+          setPickMode(false);
+          setIsFormDirty(false);
+        }}
+      />
     </div>
   );
 }
