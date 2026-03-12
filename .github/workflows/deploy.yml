@@ -24,6 +24,7 @@ jobs:
       - run: npm run build
         env:
           NEXT_PUBLIC_BASE_PATH: /votantes-map
+      - run: touch out/.nojekyll
 
       - uses: actions/upload-pages-artifact@v3
         with:
