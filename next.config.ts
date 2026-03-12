@@ -1,12 +1,15 @@
 /** @type {import('next').NextConfig} */
 
-const isProd = process.env.NODE_ENV === "production";
-const repo = "votantes-map"; // nombre del repo
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+const normalizedBasePath = basePath === "/" ? "" : basePath;
 
 const nextConfig = {
   output: "export",
-  basePath: isProd ? `/${repo}` : "",
-  assetPrefix: isProd ? `/${repo}/` : "",
+  basePath: normalizedBasePath,
+  assetPrefix: normalizedBasePath ? `${normalizedBasePath}/` : "",
+  env: {
+    NEXT_PUBLIC_BASE_PATH: normalizedBasePath,
+  },
   images: {
     unoptimized: true,
   },
