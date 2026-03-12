@@ -49,7 +49,7 @@ function LocationWatcher({
 
         const response = await fetch(
           `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=12&accept-language=es`,
-          { signal: controller.signal }
+          { signal: controller.signal },
         );
         if (!response.ok) throw new Error("reverse geocode failed");
         const data = (await response.json()) as {

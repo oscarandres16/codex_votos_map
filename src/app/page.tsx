@@ -15,7 +15,7 @@ import { MapOverlays } from "@/components/MapOverlays";
 
 const MapView = dynamic(
   () => import("@/components/MapView").then((mod) => mod.MapView),
-  { ssr: false }
+  { ssr: false },
 );
 
 const emptyForm: FormState = {
@@ -69,7 +69,7 @@ export default function Home() {
       label: "Satélite",
       url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       attribution:
-        'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye',
+        "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye",
     },
     {
       id: "oscuro",
@@ -79,17 +79,17 @@ export default function Home() {
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
     },
   ];
-const storageKey = "votantes-map-state";
-const votersStorageKey = "votantes-data";
-const routesStorageKey = "votantes-routes";
+  const storageKey = "votantes-map-state";
+  const votersStorageKey = "votantes-data";
+  const routesStorageKey = "votantes-routes";
 
   const [voters, setVoters] = useState<Voter[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<
-    "Todas" | VoterStatus
-  >("Todas");
+  const [statusFilter, setStatusFilter] = useState<"Todas" | VoterStatus>(
+    "Todas",
+  );
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [showDiscardWarning, setShowDiscardWarning] = useState(false);
   const [mode, setMode] = useState<FormMode>("create");
@@ -125,11 +125,19 @@ const routesStorageKey = "votantes-routes";
   >([]);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [showRoutePanel, setShowRoutePanel] = useState(true);
-  const searchCacheRef = useRef<Map<string, { ts: number; results: {
-    display_name: string;
-    lat: string;
-    lon: string;
-  }[] }>>(new Map());
+  const searchCacheRef = useRef<
+    Map<
+      string,
+      {
+        ts: number;
+        results: {
+          display_name: string;
+          lat: string;
+          lon: string;
+        }[];
+      }
+    >
+  >(new Map());
   const lastSearchAtRef = useRef(0);
   const readStoredMapState = () => {
     if (typeof window === "undefined") return null;
@@ -216,12 +224,12 @@ const routesStorageKey = "votantes-routes";
       const candidate = query || ll || "";
       if (candidate) {
         const match = candidate.match(
-          /(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/i
+          /(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/i,
         );
         if (match) return [Number(match[1]), Number(match[2])] as const;
       }
       const atMatch = url.pathname.match(
-        /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/i
+        /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/i,
       );
       if (atMatch) return [Number(atMatch[1]), Number(atMatch[2])] as const;
     } catch {
@@ -235,12 +243,15 @@ const routesStorageKey = "votantes-routes";
       routeStops
         .map((id) => voters.find((voter) => voter.id === id))
         .filter((voter): voter is Voter => Boolean(voter)),
-    [routeStops, voters]
+    [routeStops, voters],
   );
 
   const routePositions = useMemo(
-    () => routeStopVoters.map((voter) => [voter.lat, voter.lng] as [number, number]),
-    [routeStopVoters]
+    () =>
+      routeStopVoters.map(
+        (voter) => [voter.lat, voter.lng] as [number, number],
+      ),
+    [routeStopVoters],
   );
 
   const addRouteStop = (id: string) => {
@@ -256,7 +267,7 @@ const routesStorageKey = "votantes-routes";
         (voter) =>
           !routeStops.includes(voter.id) &&
           (voter.name.toLowerCase().includes(term) ||
-            voter.neighborhood.toLowerCase().includes(term))
+            voter.neighborhood.toLowerCase().includes(term)),
       )
       .slice(0, 5);
   }, [routeCandidate, voters, routeStops]);
@@ -316,7 +327,9 @@ const routesStorageKey = "votantes-routes";
       const index = prev.indexOf(id);
       if (index === -1) return prev;
       const targetIndex =
-        direction === "up" ? Math.max(index - 1, 0) : Math.min(index + 1, prev.length - 1);
+        direction === "up"
+          ? Math.max(index - 1, 0)
+          : Math.min(index + 1, prev.length - 1);
       const next = [...prev];
       const tmp = next[targetIndex];
       next[targetIndex] = next[index];
@@ -371,7 +384,9 @@ const routesStorageKey = "votantes-routes";
     if (!storageLoaded) return;
     if (typeof window === "undefined") return;
     const map = mapRef.current;
-    const center = map ? map.getCenter() : { lat: mapCenter[0], lng: mapCenter[1] };
+    const center = map
+      ? map.getCenter()
+      : { lat: mapCenter[0], lng: mapCenter[1] };
     const zoom = map ? map.getZoom() : mapZoom;
     const payload = {
       center: { lat: center.lat, lng: center.lng },
@@ -398,7 +413,7 @@ const routesStorageKey = "votantes-routes";
         mapRef.current?.setView(
           [latitude, longitude],
           Math.max(mapRef.current?.getZoom() ?? 12, 14),
-          { animate: true }
+          { animate: true },
         );
         setLocating(false);
       },
@@ -406,7 +421,7 @@ const routesStorageKey = "votantes-routes";
         setSearchError("No pudimos obtener la ubicación.");
         setLocating(false);
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: true, timeout: 10000 },
     );
   };
 
@@ -442,7 +457,7 @@ const routesStorageKey = "votantes-routes";
     searchControllerRef.current = controller;
     try {
       const nominatimUrl = new URL(
-        "https://nominatim.openstreetmap.org/search"
+        "https://nominatim.openstreetmap.org/search",
       );
       nominatimUrl.searchParams.set("format", "jsonv2");
       nominatimUrl.searchParams.set("q", normalized);
@@ -471,9 +486,9 @@ const routesStorageKey = "votantes-routes";
         try {
           const fallback = await fetch(
             `https://photon.komoot.io/api/?q=${encodeURIComponent(
-              normalized
+              normalized,
             )}&limit=6&lang=es`,
-            { signal: controller.signal }
+            { signal: controller.signal },
           );
           if (!fallback.ok) throw new Error("fallback failed");
           const data = (await fallback.json()) as {
@@ -491,12 +506,7 @@ const routesStorageKey = "votantes-routes";
             data.features?.map((feature) => {
               const [lon, lat] = feature.geometry?.coordinates ?? [0, 0];
               const props = feature.properties ?? {};
-              const label = [
-                props.name,
-                props.city,
-                props.state,
-                props.country,
-              ]
+              const label = [props.name, props.city, props.state, props.country]
                 .filter(Boolean)
                 .join(", ");
               return {
@@ -773,7 +783,7 @@ const routesStorageKey = "votantes-routes";
       } else if (selected) {
         setVoters((prev) => {
           const nextList = prev.map((item) =>
-            item.id === selected.id ? nextVoter : item
+            item.id === selected.id ? nextVoter : item,
           );
           persistVoters(nextList);
           return nextList;
@@ -830,7 +840,6 @@ const routesStorageKey = "votantes-routes";
           onPickLocation={handlePickLocation}
           routePositions={routePositions}
         />
-
       </div>
       <RoutesPanel
         isOpen={showRoutePanel}
@@ -915,7 +924,6 @@ const routesStorageKey = "votantes-routes";
           </div>
         </main>
       </div>
-
 
       <SearchModal
         isOpen={isSearchOpen}
