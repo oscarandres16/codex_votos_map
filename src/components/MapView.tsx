@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   CircleMarker,
   MapContainer,
+  Pane,
+  Polygon,
   Polyline,
   TileLayer,
   Popup,
@@ -12,6 +14,7 @@ import {
   useMapEvents,
 } from "react-leaflet";
 import type { Voter } from "@/lib/voters-store";
+import type { Zone } from "@/lib/zones-store";
 import type { Map as LeafletMap } from "leaflet";
 import type L from "leaflet";
 
@@ -120,6 +123,15 @@ export function MapView({
   pickMode,
   onPickLocation,
   routePositions,
+  zones,
+  selectedZoneId,
+  drawMode,
+  drawingPoints,
+  onAddDrawPoint,
+  onSelectZone,
+  zoneCounts,
+  onHoverPoint,
+  hoverPoint,
 }: {
   voters: Voter[];
   selectedId: string | null;
@@ -137,17 +149,110 @@ export function MapView({
   pickMode: boolean;
   onPickLocation: (lat: number, lng: number) => void;
   routePositions?: [number, number][];
+  zones: Zone[];
+  selectedZoneId: string | null;
+  drawMode: boolean;
+  drawingPoints: [number, number][];
+  onAddDrawPoint: (lat: number, lng: number) => void;
+  onSelectZone: (id: string) => void;
+  zoneCounts: Record<string, number>;
+  onHoverPoint: (lat: number, lng: number) => void;
+  hoverPoint: [number, number] | null;
 }) {
   const selected = voters.find((voter) => voter.id === selectedId) ?? null;
+  const selectedZone = zones.find((zone) => zone.id === selectedZoneId) ?? null;
+  const selectedZoneCenter = useMemo(() => {
+    if (!selectedZone || selectedZone.points.length === 0) return null;
+    const sum = selectedZone.points.reduce(
+      (acc, point) => [acc[0] + point[0], acc[1] + point[1]],
+      [0, 0] as [number, number],
+    );
+    return [
+      sum[0] / selectedZone.points.length,
+      sum[1] / selectedZone.points.length,
+    ] as [number, number];
+  }, [selectedZone]);
 
   return (
     <MapContainer
       center={initialCenter ?? center}
       zoom={initialZoom ?? 12}
       scrollWheelZoom={interactionEnabled}
-      className={`h-full w-full ${pickMode ? "cursor-crosshair" : ""}`}
+      className="h-full w-full"
     >
       <TileLayer attribution={tileAttribution} url={tileUrl} />
+      <Pane name="zones" style={{ zIndex: 200 }}>
+        {zones.map((zone) => (
+          <Polygon
+            key={zone.id}
+            positions={zone.points}
+            pathOptions={{
+              color: zone.color,
+              fillColor: zone.color,
+              fillOpacity: zone.id === selectedZoneId ? 0.35 : 0.18,
+              weight: zone.id === selectedZoneId ? 3 : 2,
+            }}
+            eventHandlers={{
+              click: () => onSelectZone(zone.id),
+            }}
+          >
+            <Tooltip direction="top" opacity={1} sticky>
+              {zone.name}
+            </Tooltip>
+          </Polygon>
+        ))}
+        {drawMode && drawingPoints.length > 0 ? (
+          <>
+            {drawingPoints.map((point, index) => (
+              <CircleMarker
+                key={`${point[0]}-${point[1]}-${index}`}
+                center={point}
+                radius={4}
+                pathOptions={{
+                  color: "#ffffff",
+                  fillColor: "#ffffff",
+                  fillOpacity: 0.9,
+                  weight: 1,
+                }}
+                interactive={false}
+              />
+            ))}
+            {hoverPoint ? (
+              <Polyline
+                positions={[drawingPoints[drawingPoints.length - 1], hoverPoint]}
+                pathOptions={{ color: "#ffffff", weight: 1.5, dashArray: "4 6" }}
+              />
+            ) : null}
+          </>
+        ) : null}
+        {drawMode && drawingPoints.length > 1 ? (
+          <Polyline
+            positions={drawingPoints}
+            pathOptions={{ color: "#ffffff", weight: 2, dashArray: "6 6" }}
+          />
+        ) : null}
+        {drawMode && drawingPoints.length > 2 ? (
+          <Polygon
+            positions={drawingPoints}
+            pathOptions={{
+              color: "#ffffff",
+              fillColor: "#ffffff",
+              fillOpacity: 0.15,
+              weight: 2,
+              dashArray: "6 6",
+            }}
+          />
+        ) : null}
+      </Pane>
+      <Pane name="zone-popups" style={{ zIndex: 700 }}>
+        {selectedZone && selectedZoneCenter ? (
+          <ZonePopup
+            zone={selectedZone}
+            center={selectedZoneCenter}
+            count={zoneCounts[selectedZone.id] ?? 0}
+          />
+        ) : null}
+      </Pane>
       {routePositions && routePositions.length > 1 ? (
         <Polyline
           positions={routePositions}
@@ -169,7 +274,7 @@ export function MapView({
             }}
             eventHandlers={{
               click: () => {
-                if (!interactionEnabled || pickMode) return;
+                if (!interactionEnabled || pickMode || drawMode) return;
                 onSelect(voter.id);
               },
             }}
@@ -181,6 +286,11 @@ export function MapView({
         );
       })}
       <PickLocationHandler enabled={pickMode} onPick={onPickLocation} />
+      <DrawZoneHandler
+        enabled={drawMode}
+        onAddPoint={onAddDrawPoint}
+        onMove={onHoverPoint}
+      />
       <SelectedPopup
         selected={selected}
         onClearSelected={onClearSelected}
@@ -190,8 +300,44 @@ export function MapView({
       <FlyToSelected selected={selected} />
       <LocationWatcher onLocation={onLocationChange} />
       <InteractionToggle enabled={interactionEnabled} />
+      <CursorToggle drawMode={drawMode} pickMode={pickMode} />
       <MapReady onReady={onMapReady} />
     </MapContainer>
+  );
+}
+
+function ZonePopup({
+  zone,
+  center,
+  count,
+}: {
+  zone: Zone;
+  center: [number, number];
+  count: number;
+}) {
+  const map = useMap();
+  const popupRef = useRef<L.Popup | null>(null);
+
+  useEffect(() => {
+    if (!popupRef.current) return;
+    map.openPopup(popupRef.current);
+  }, [map, zone.id, center]);
+
+  return (
+    <Popup ref={popupRef} position={center} closeButton autoClose={false}>
+      <div className="space-y-2 text-sm">
+        <div>
+          <p className="text-xs uppercase tracking-[0.2em] text-emerald-200/70">
+            Zona
+          </p>
+          <h3 className="text-base font-semibold text-white">{zone.name}</h3>
+        </div>
+        <p className="text-xs text-white/70">Votantes: {count}</p>
+        {zone.notes ? (
+          <p className="text-xs text-white/60">{zone.notes}</p>
+        ) : null}
+      </div>
+    </Popup>
   );
 }
 
@@ -206,6 +352,28 @@ function PickLocationHandler({
     click(event) {
       if (!enabled) return;
       onPick(event.latlng.lat, event.latlng.lng);
+    },
+  });
+  return null;
+}
+
+function DrawZoneHandler({
+  enabled,
+  onAddPoint,
+  onMove,
+}: {
+  enabled: boolean;
+  onAddPoint: (lat: number, lng: number) => void;
+  onMove: (lat: number, lng: number) => void;
+}) {
+  useMapEvents({
+    click(event) {
+      if (!enabled) return;
+      onAddPoint(event.latlng.lat, event.latlng.lng);
+    },
+    mousemove(event) {
+      if (!enabled) return;
+      onMove(event.latlng.lat, event.latlng.lng);
     },
   });
   return null;
@@ -229,6 +397,31 @@ function InteractionToggle({ enabled }: { enabled: boolean }) {
     map.boxZoom.disable();
     map.keyboard.disable();
   }, [enabled, map]);
+
+  return null;
+}
+
+function CursorToggle({
+  drawMode,
+  pickMode,
+}: {
+  drawMode: boolean;
+  pickMode: boolean;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    const container = map.getContainer();
+    container.classList.remove("zone-draw-cursor");
+    container.classList.remove("cursor-crosshair");
+    if (drawMode) {
+      container.classList.add("zone-draw-cursor");
+      return;
+    }
+    if (pickMode) {
+      container.classList.add("cursor-crosshair");
+    }
+  }, [map, drawMode, pickMode]);
 
   return null;
 }

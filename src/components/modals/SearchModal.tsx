@@ -36,28 +36,14 @@ export function SearchModal({
           onClick={(event) => event.stopPropagation()}
         >
           <div className="flex items-center gap-3 rounded-full border border-white/10 bg-white/5 px-4 py-3">
-            <svg
-              className="h-4 w-4 text-emerald-200"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="11" cy="11" r="6.5" />
-              <path d="M16.2 16.2 21 21" />
-            </svg>
+            <span className="material-symbols-rounded text-[18px] text-emerald-200">
+              search
+            </span>
             <input
               autoFocus
               value={query}
               onChange={(event) => onQueryChange(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  onSearch(query);
-                }
                 if (event.key === "Escape") {
                   onClose();
                 }

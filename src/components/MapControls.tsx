@@ -46,19 +46,9 @@ export function MapControls({
           aria-label="Ir a mi ubicación"
           title="Mi ubicación (L)"
         >
-          <svg
-            className="h-4 w-4"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <circle cx="12" cy="12" r="3.2" />
-            <path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22" />
-          </svg>
+          <span className="material-symbols-rounded text-[18px]">
+            my_location
+          </span>
         </button>
         <button
           onClick={onSearchOpen}
@@ -66,19 +56,7 @@ export function MapControls({
           aria-label="Buscar ubicación"
           title="Buscar ubicación (S)"
         >
-          <svg
-            className="h-4 w-4"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <circle cx="11" cy="11" r="6.5" />
-            <path d="M16.2 16.2 21 21" />
-          </svg>
+          <span className="material-symbols-rounded text-[18px]">search</span>
         </button>
         <button
           onClick={onToggleInteraction}
@@ -90,22 +68,9 @@ export function MapControls({
           title="Arrastrar mapa (N)"
         >
           <span className="inline-flex items-center gap-2">
-            <svg
-              className="h-4 w-4"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M7 12V6a1 1 0 0 1 2 0v6" />
-              <path d="M11 12V5a1 1 0 0 1 2 0v7" />
-              <path d="M15 12V6a1 1 0 0 1 2 0v8" />
-              <path d="M19 13V9a1 1 0 0 1 2 0v6" />
-              <path d="M3 14l4.5 4.5a4 4 0 0 0 2.83 1.17h3.34a4 4 0 0 0 3.2-1.6l2.13-2.84" />
-            </svg>
+            <span className="material-symbols-rounded text-[18px]">
+              pan_tool
+            </span>
             {interactionEnabled ? "Arrastrar activo" : "Arrastrar"}
           </span>
         </button>

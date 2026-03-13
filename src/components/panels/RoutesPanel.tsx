@@ -14,6 +14,7 @@ export function RoutesPanel({
   isOpen,
   onShow,
   onHide,
+  buttonPositionClass = "top-6 right-6",
   routeStopVoters,
   routeStops,
   selectedId,
@@ -41,6 +42,7 @@ export function RoutesPanel({
   isOpen: boolean;
   onShow: () => void;
   onHide: () => void;
+  buttonPositionClass?: string;
   routeStopVoters: Voter[];
   routeStops: string[];
   selectedId: string | null;
@@ -69,8 +71,9 @@ export function RoutesPanel({
     return (
       <button
         onClick={onShow}
-        className="pointer-events-auto absolute top-6 right-6 z-40 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white shadow-xl backdrop-blur"
+        className={`pointer-events-auto absolute ${buttonPositionClass} z-40 flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white shadow-xl backdrop-blur`}
       >
+        <span className="material-symbols-rounded text-[18px]">route</span>
         Mostrar rutas
       </button>
     );

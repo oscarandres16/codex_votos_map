@@ -18,4 +18,8 @@ export type FormState = {
   lat: number;
   lng: number;
   notes: string;
+  leaderId: string;
+  zoneId: string;
+  mesa: number;
+  pollingZoneId: string;
 };

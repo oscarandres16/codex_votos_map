@@ -2,6 +2,8 @@
 
 import type { Dispatch, SetStateAction } from "react";
 import type { VoterPriority, VoterStatus } from "@/lib/voters-store";
+import type { Leader } from "@/lib/leaders-store";
+import type { PollingZone } from "@/lib/polling-zones";
 import type { FormMode, FormState } from "@/lib/form-types";
 
 export function VoterModal({
@@ -15,6 +17,8 @@ export function VoterModal({
   onPickLocationMode,
   onSubmit,
   saving,
+  leaders,
+  pollingZones,
 }: {
   isOpen: boolean;
   mode: FormMode;
@@ -26,6 +30,8 @@ export function VoterModal({
   onPickLocationMode: () => void;
   onSubmit: () => void;
   saving: boolean;
+  leaders: Leader[];
+  pollingZones: PollingZone[];
 }) {
   if (!isOpen) return null;
 
@@ -220,6 +226,32 @@ export function VoterModal({
                 Gestión
               </p>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <label className="text-xs text-white/60 md:col-span-2">
+                  Líder político (opcional)
+                  <select
+                    value={form.leaderId}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        leaderId: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
+                  >
+                    <option className="text-black" value="">
+                      Sin líder asignado
+                    </option>
+                    {leaders.map((leader) => (
+                      <option
+                        key={leader.id}
+                        className="text-black"
+                        value={leader.id}
+                      >
+                        {leader.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label className="text-xs text-white/60">
                   Estado
                   <select
@@ -242,6 +274,47 @@ export function VoterModal({
                       En revisión
                     </option>
                   </select>
+                </label>
+                <label className="text-xs text-white/60 md:col-span-2">
+                  Puesto de votación (opcional)
+                  <select
+                    value={form.pollingZoneId}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        pollingZoneId: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
+                  >
+                    <option className="text-black" value="">
+                      Sin puesto asignado
+                    </option>
+                    {pollingZones.map((zone) => (
+                      <option
+                        key={zone.id}
+                        className="text-black"
+                        value={zone.id}
+                      >
+                        {zone.name} · {zone.municipio}, {zone.departamento}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs text-white/60">
+                  Mesa
+                  <input
+                    type="number"
+                    min={0}
+                    value={form.mesa}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        mesa: Number(event.target.value),
+                      }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-emerald-400/60 focus:outline-none"
+                  />
                 </label>
                 <label className="text-xs text-white/60">
                   Prioridad

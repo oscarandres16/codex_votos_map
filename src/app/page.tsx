@@ -1,11 +1,17 @@
 "use client";
 
 import type { Voter, VoterPriority, VoterStatus } from "@/lib/voters-store";
+import type { Leader } from "@/lib/leaders-store";
 import type { FormMode, FormState } from "@/lib/form-types";
+import type { Zone } from "@/lib/zones-store";
+import type { PollingZone } from "@/lib/polling-zones";
+import { POLLING_ZONES_KEY } from "@/lib/polling-zones";
 import type { Map as LeafletMap } from "leaflet";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { DiscardModal } from "@/components/modals/DiscardModal";
+import { ConfirmDeleteModal } from "@/components/modals/ConfirmDeleteModal";
 import { SearchModal } from "@/components/modals/SearchModal";
 import { VoterModal } from "@/components/modals/VoterModal";
 import { RoutesPanel } from "@/components/panels/RoutesPanel";
@@ -34,6 +40,10 @@ const emptyForm: FormState = {
   lat: 4.65,
   lng: -74.07,
   notes: "",
+  leaderId: "",
+  zoneId: "",
+  mesa: 0,
+  pollingZoneId: "",
 };
 
 const statusStyles: Record<VoterStatus, string> = {
@@ -49,6 +59,7 @@ const priorityStyles: Record<VoterPriority, string> = {
 };
 
 export default function Home() {
+  const searchParams = useSearchParams();
   const mapLayers = [
     {
       id: "standard",
@@ -82,8 +93,13 @@ export default function Home() {
   const storageKey = "votantes-map-state";
   const votersStorageKey = "votantes-data";
   const routesStorageKey = "votantes-routes";
+  const leadersStorageKey = "votantes-leaders";
+  const zonesStorageKey = "votantes-zones";
 
   const [voters, setVoters] = useState<Voter[]>([]);
+  const [leaders, setLeaders] = useState<Leader[]>([]);
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [pollingZones, setPollingZones] = useState<PollingZone[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -125,6 +141,22 @@ export default function Home() {
   >([]);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [showRoutePanel, setShowRoutePanel] = useState(true);
+  const [zonesPanelOpen, setZonesPanelOpen] = useState(true);
+  const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
+  const [drawMode, setDrawMode] = useState(false);
+  const [drawingPoints, setDrawingPoints] = useState<[number, number][]>([]);
+  const [drawingHover, setDrawingHover] = useState<[number, number] | null>(
+    null,
+  );
+  const [zoneForm, setZoneForm] = useState({
+    name: "",
+    color: "#4ee6a8",
+    notes: "",
+  });
+  const [zoneError, setZoneError] = useState("");
+  const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
+  const [zoneDeleteTarget, setZoneDeleteTarget] = useState<Zone | null>(null);
+  const prevInteractionRef = useRef<boolean | null>(null);
   const searchCacheRef = useRef<
     Map<
       string,
@@ -138,7 +170,7 @@ export default function Home() {
       }
     >
   >(new Map());
-  const lastSearchAtRef = useRef(0);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const readStoredMapState = () => {
     if (typeof window === "undefined") return null;
     const raw = window.localStorage.getItem(storageKey);
@@ -200,7 +232,11 @@ export default function Home() {
     a.visits === b.visits &&
     a.lat === b.lat &&
     a.lng === b.lng &&
-    a.notes === b.notes;
+    a.notes === b.notes &&
+    a.leaderId === b.leaderId &&
+    a.zoneId === b.zoneId &&
+    a.mesa === b.mesa &&
+    a.pollingZoneId === b.pollingZoneId;
 
   const requestCloseModal = useCallback(() => {
     if (isFormDirty) {
@@ -236,6 +272,24 @@ export default function Home() {
       return null;
     }
     return null;
+  };
+
+  const isPointInPolygon = (
+    point: [number, number],
+    polygon: [number, number][],
+  ) => {
+    if (polygon.length < 3) return false;
+    const [lat, lng] = point;
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const [latI, lngI] = polygon[i];
+      const [latJ, lngJ] = polygon[j];
+      const intersect =
+        lngI > lng !== lngJ > lng &&
+        lat < ((latJ - latI) * (lng - lngI)) / (lngJ - lngI) + latI;
+      if (intersect) inside = !inside;
+    }
+    return inside;
   };
 
   const routeStopVoters = useMemo(
@@ -340,6 +394,181 @@ export default function Home() {
 
   const clearRoute = () => setRouteStops([]);
 
+  const randomZoneColor = () =>
+    `#${Math.floor(Math.random() * 0xffffff)
+      .toString(16)
+      .padStart(6, "0")}`;
+
+  const startNewZone = () => {
+    setEditingZoneId(null);
+    setZoneForm({ name: "", color: randomZoneColor(), notes: "" });
+    setDrawingPoints([]);
+    setDrawMode(true);
+    setDrawingHover(null);
+    setZoneError("");
+    setSelectedZoneId(null);
+    setShowRoutePanel(false);
+    setZonesPanelOpen(true);
+  };
+
+  const startEditZone = (zone: Zone) => {
+    setEditingZoneId(zone.id);
+    setZoneForm({ name: zone.name, color: zone.color, notes: zone.notes });
+    setDrawingPoints(zone.points);
+    setDrawMode(false);
+    setZoneError("");
+    setSelectedZoneId(zone.id);
+  };
+
+  const startRedraw = () => {
+    setDrawingPoints([]);
+    setDrawMode(true);
+    setZoneError("");
+    setDrawingHover(null);
+  };
+
+  const addZonePoint = (lat: number, lng: number) => {
+    if (!drawMode) return;
+    setDrawingPoints((prev) => [...prev, [lat, lng]]);
+  };
+
+  const handleHoverPoint = (lat: number, lng: number) => {
+    if (!drawMode) return;
+    setDrawingHover([lat, lng]);
+  };
+
+  const undoZonePoint = () => {
+    setDrawingPoints((prev) => prev.slice(0, -1));
+  };
+
+  const clearZoneDrawing = () => {
+    setDrawingPoints([]);
+    setDrawingHover(null);
+  };
+
+  const saveZone = () => {
+    if (!zoneForm.name.trim()) {
+      setZoneError("Ingresa un nombre para la zona.");
+      return;
+    }
+    if (drawingPoints.length < 3) {
+      setZoneError("Dibuja al menos 3 puntos para cerrar la zona.");
+      return;
+    }
+    const payload: Zone = {
+      id: editingZoneId ?? crypto.randomUUID(),
+      name: zoneForm.name.trim(),
+      color: zoneForm.color,
+      notes: zoneForm.notes.trim(),
+      points: drawingPoints,
+    };
+    setVoters((prev) => {
+      const next = prev.map((voter) => {
+        const inside = isPointInPolygon([voter.lat, voter.lng], payload.points);
+        if (inside) {
+          return { ...voter, zoneId: payload.id };
+        }
+        if (voter.zoneId === payload.id) {
+          return { ...voter, zoneId: undefined };
+        }
+        return voter;
+      });
+      persistVoters(next);
+      return next;
+    });
+    setZones((prev) => {
+      const next = editingZoneId
+        ? prev.map((item) => (item.id === editingZoneId ? payload : item))
+        : [payload, ...prev];
+      persistZones(next);
+      return next;
+    });
+    setSelectedZoneId(payload.id);
+    setEditingZoneId(null);
+    setDrawMode(false);
+    setDrawingHover(null);
+    setZoneError("");
+    setZoneForm({ name: "", color: randomZoneColor(), notes: "" });
+    setDrawingPoints([]);
+  };
+
+  const requestDeleteZone = (zone: Zone) => {
+    setZoneDeleteTarget(zone);
+  };
+
+  const confirmDeleteZone = () => {
+    if (!zoneDeleteTarget) return;
+    setZones((prev) => {
+      const next = prev.filter((item) => item.id !== zoneDeleteTarget.id);
+      persistZones(next);
+      return next;
+    });
+    setVoters((prev) => {
+      const next = prev.map((voter) =>
+        voter.zoneId === zoneDeleteTarget.id
+          ? { ...voter, zoneId: undefined }
+          : voter,
+      );
+      persistVoters(next);
+      return next;
+    });
+    if (selectedZoneId === zoneDeleteTarget.id) {
+      setSelectedZoneId(null);
+    }
+    if (editingZoneId === zoneDeleteTarget.id) {
+      setEditingZoneId(null);
+      setZoneForm({ name: "", color: "#4ee6a8", notes: "" });
+      setDrawingPoints([]);
+      setDrawMode(false);
+      setDrawingHover(null);
+    }
+    setZoneDeleteTarget(null);
+  };
+
+  const lastZoneParamRef = useRef<string | null>(null);
+  const pendingZoneActionRef = useRef<{ id: string; mode: string | null } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const zoneId = searchParams.get("zoneId");
+    const mode = searchParams.get("zoneMode");
+    if (!zoneId) return;
+    const key = `${zoneId}:${mode ?? ""}`;
+    if (lastZoneParamRef.current === key) return;
+    pendingZoneActionRef.current = { id: zoneId, mode };
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!pendingZoneActionRef.current) return;
+    const { id, mode } = pendingZoneActionRef.current;
+    const target = zones.find((zone) => zone.id === id);
+    if (!target) return;
+    const key = `${id}:${mode ?? ""}`;
+    lastZoneParamRef.current = key;
+    pendingZoneActionRef.current = null;
+    setZonesPanelOpen(true);
+    setShowRoutePanel(false);
+    setSelectedZoneId(target.id);
+    if (mode === "edit") {
+      startEditZone(target);
+    }
+  }, [zones]);
+
+  useEffect(() => {
+    if (drawMode) {
+      if (prevInteractionRef.current === null) {
+        prevInteractionRef.current = interactionEnabled;
+      }
+      setInteractionEnabled(false);
+      return;
+    }
+    if (prevInteractionRef.current !== null) {
+      setInteractionEnabled(prevInteractionRef.current);
+      prevInteractionRef.current = null;
+    }
+  }, [drawMode]);
+
   useEffect(() => {
     const raw = window.localStorage.getItem(votersStorageKey);
     if (raw) {
@@ -355,6 +584,45 @@ export default function Home() {
     setSelectedId(null);
     setManualClear(true);
     setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem(leadersStorageKey);
+    if (!raw) {
+      setLeaders([]);
+      return;
+    }
+    try {
+      setLeaders(JSON.parse(raw));
+    } catch {
+      setLeaders([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem(POLLING_ZONES_KEY);
+    if (!raw) {
+      setPollingZones([]);
+      return;
+    }
+    try {
+      setPollingZones(JSON.parse(raw));
+    } catch {
+      setPollingZones([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem(zonesStorageKey);
+    if (!raw) {
+      setZones([]);
+      return;
+    }
+    try {
+      setZones(JSON.parse(raw));
+    } catch {
+      setZones([]);
+    }
   }, []);
 
   const persistVoters = (next: Voter[]) => {
@@ -378,6 +646,11 @@ export default function Home() {
   const persistRoutes = (next: typeof savedRoutes) => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(routesStorageKey, JSON.stringify(next));
+  };
+
+  const persistZones = (next: Zone[]) => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(zonesStorageKey, JSON.stringify(next));
   };
 
   const persistMapState = (nextLayerId?: string) => {
@@ -432,17 +705,12 @@ export default function Home() {
       setSearchError("");
       return;
     }
-    if (normalized.length < 3) {
+    if (normalized.length < 2) {
       setSearchResults([]);
-      setSearchError("Escribe al menos 3 caracteres.");
+      setSearchError("Escribe al menos 2 caracteres.");
       return;
     }
     const now = Date.now();
-    if (now - lastSearchAtRef.current < 800) {
-      setSearchError("Espera un momento e intenta de nuevo.");
-      return;
-    }
-    lastSearchAtRef.current = now;
     const cached = searchCacheRef.current.get(normalized);
     if (cached && now - cached.ts < 5 * 60 * 1000) {
       setSearchResults(cached.results);
@@ -529,6 +797,38 @@ export default function Home() {
     }
   };
 
+  useEffect(() => {
+    if (!isSearchOpen) {
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+      }
+      searchControllerRef.current?.abort();
+      return;
+    }
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+    }
+    const term = searchQuery.trim();
+    if (!term) {
+      setSearchResults([]);
+      setSearchError("");
+      return;
+    }
+    if (term.length < 2) {
+      setSearchResults([]);
+      setSearchError("Escribe al menos 2 caracteres.");
+      return;
+    }
+    searchDebounceRef.current = setTimeout(() => {
+      handleSearch(term);
+    }, 450);
+    return () => {
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+      }
+    };
+  }, [searchQuery, isSearchOpen]);
+
   const handleSelectResult = (result: {
     display_name: string;
     lat: string;
@@ -609,8 +909,14 @@ export default function Home() {
     if (!map) return;
     const handleMove = () => {
       const center = map.getCenter();
-      setMapCenter([center.lat, center.lng]);
-      setMapZoom(map.getZoom());
+      const nextCenter: [number, number] = [center.lat, center.lng];
+      const nextZoom = map.getZoom();
+      setMapCenter((prev) =>
+        prev[0] === nextCenter[0] && prev[1] === nextCenter[1]
+          ? prev
+          : nextCenter,
+      );
+      setMapZoom((prev) => (prev === nextZoom ? prev : nextZoom));
       persistMapState();
     };
     map.on("moveend", handleMove);
@@ -621,6 +927,28 @@ export default function Home() {
       map.off("zoomend", handleMove);
     };
   }, [mapReady, storageLoaded]);
+
+  useEffect(() => {
+    if (!zonesPanelOpen) return;
+    if (editingZoneId) return;
+    if (zoneForm.name || zoneForm.notes || drawingPoints.length > 0) return;
+    setZoneForm((prev) => ({
+      ...prev,
+      color: randomZoneColor(),
+    }));
+  }, [zonesPanelOpen, editingZoneId, zoneForm.name, zoneForm.notes, drawingPoints.length]);
+
+  useEffect(() => {
+    if (showRoutePanel && zonesPanelOpen) {
+      setZonesPanelOpen(false);
+    }
+  }, [showRoutePanel, zonesPanelOpen]);
+
+  useEffect(() => {
+    if (zonesPanelOpen && showRoutePanel) {
+      setShowRoutePanel(false);
+    }
+  }, [zonesPanelOpen, showRoutePanel]);
 
   useEffect(() => {
     persistMapState(mapLayers[mapLayerIndex].id);
@@ -639,6 +967,11 @@ export default function Home() {
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isTypingTarget(event.target)) return;
+      if (event.key === "Enter" && drawMode && drawingPoints.length >= 3) {
+        event.preventDefault();
+        saveZone();
+        return;
+      }
       if (event.key === "n" || event.key === "N") {
         setInteractionEnabled((prev) => !prev);
       }
@@ -655,6 +988,11 @@ export default function Home() {
       if (event.key === "Escape") {
         if (showDiscardWarning) {
           setShowDiscardWarning(false);
+          return;
+        }
+        if (drawMode) {
+          setDrawMode(false);
+          setDrawingHover(null);
           return;
         }
         setIsSearchOpen(false);
@@ -679,7 +1017,13 @@ export default function Home() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isModalOpen, requestCloseModal, showDiscardWarning]);
+  }, [
+    isModalOpen,
+    requestCloseModal,
+    showDiscardWarning,
+    drawMode,
+    drawingPoints.length,
+  ]);
 
   const selected = voters.find((voter) => voter.id === selectedId) ?? null;
 
@@ -716,6 +1060,15 @@ export default function Home() {
     return { total, confirmed, pending, review };
   }, [voters]);
 
+  const zoneCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    voters.forEach((voter) => {
+      if (!voter.zoneId) return;
+      counts[voter.zoneId] = (counts[voter.zoneId] ?? 0) + 1;
+    });
+    return counts;
+  }, [voters]);
+
   const openCreate = () => {
     setMode("create");
     setForm(emptyForm);
@@ -743,6 +1096,10 @@ export default function Home() {
       lat: voter.lat,
       lng: voter.lng,
       notes: voter.notes,
+      leaderId: voter.leaderId ?? "",
+      zoneId: voter.zoneId ?? "",
+      mesa: voter.mesa ?? 0,
+      pollingZoneId: voter.pollingZoneId ?? "",
     };
     setForm(nextForm);
     initialFormRef.current = nextForm;
@@ -771,6 +1128,10 @@ export default function Home() {
         lat: form.lat,
         lng: form.lng,
         notes: form.notes,
+        leaderId: form.leaderId || undefined,
+        zoneId: form.zoneId || undefined,
+        mesa: form.mesa || undefined,
+        pollingZoneId: form.pollingZoneId || undefined,
       };
       if (mode === "create") {
         setVoters((prev) => {
@@ -811,7 +1172,7 @@ export default function Home() {
   };
 
   return (
-    <div className="relative min-h-screen bg-[#0f1115] text-foreground">
+    <div className="relative min-h-screen bg-[var(--background)] text-foreground">
       <div className="absolute inset-0 z-0">
         <MapView
           voters={filteredVoters}
@@ -839,12 +1200,25 @@ export default function Home() {
           pickMode={pickMode}
           onPickLocation={handlePickLocation}
           routePositions={routePositions}
+          zones={zones}
+          selectedZoneId={selectedZoneId}
+          drawMode={drawMode}
+          drawingPoints={drawingPoints}
+          onAddDrawPoint={addZonePoint}
+          onSelectZone={(id) => setSelectedZoneId(id)}
+          zoneCounts={zoneCounts}
+          onHoverPoint={handleHoverPoint}
+          hoverPoint={drawingHover}
         />
       </div>
       <RoutesPanel
         isOpen={showRoutePanel}
-        onShow={() => setShowRoutePanel(true)}
+        onShow={() => {
+          setShowRoutePanel(true);
+          setZonesPanelOpen(false);
+        }}
         onHide={() => setShowRoutePanel(false)}
+        buttonPositionClass={zonesPanelOpen ? "bottom-6 right-6" : "top-6 right-6"}
         routeStopVoters={routeStopVoters}
         routeStops={routeStops}
         selectedId={selectedId}
@@ -899,6 +1273,12 @@ export default function Home() {
               pickMode={pickMode}
             />
 
+            {drawMode ? (
+              <div className="pointer-events-auto absolute left-1/2 top-6 -translate-x-1/2 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-xs text-emerald-100 backdrop-blur">
+                Modo dibujo activo: clic para agregar puntos. Esc para salir.
+              </div>
+            ) : null}
+
             <MapControls
               interactionEnabled={interactionEnabled}
               onToggleInteraction={() => setInteractionEnabled((prev) => !prev)}
@@ -921,6 +1301,192 @@ export default function Home() {
               onZoomOut={handleZoomOut}
               onZoomIn={handleZoomIn}
             />
+
+            {zonesPanelOpen ? (
+              <div className="pointer-events-auto absolute right-6 top-6 w-80 rounded-2xl border border-white/10 bg-[var(--panel-strong)]/95 p-4 text-sm text-white/70 shadow-xl backdrop-blur">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.3em] text-white/40">
+                      Zonas
+                    </p>
+                    <p className="text-base font-semibold text-white">
+                      Barrios destacados
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setZonesPanelOpen(false)}
+                    className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/60 hover:border-white/30"
+                  >
+                    Ocultar
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  <label className="text-xs text-white/60">
+                    Nombre
+                    <input
+                      value={zoneForm.name}
+                      onChange={(event) =>
+                        setZoneForm((prev) => ({
+                          ...prev,
+                          name: event.target.value,
+                        }))
+                      }
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-[var(--accent)] focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <label className="text-xs text-white/60">
+                      Color
+                      <input
+                        type="color"
+                        value={zoneForm.color}
+                        onChange={(event) =>
+                          setZoneForm((prev) => ({
+                            ...prev,
+                            color: event.target.value,
+                          }))
+                        }
+                        className="mt-2 h-9 w-14 rounded-lg border border-white/10 bg-transparent"
+                      />
+                    </label>
+                    <label className="flex-1 text-xs text-white/60">
+                      Notas
+                      <input
+                        value={zoneForm.notes}
+                        onChange={(event) =>
+                          setZoneForm((prev) => ({
+                            ...prev,
+                            notes: event.target.value,
+                          }))
+                        }
+                        className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white focus:border-[var(--accent)] focus:outline-none"
+                      />
+                    </label>
+                  </div>
+                  {zoneError ? (
+                    <p className="text-xs text-rose-200">{zoneError}</p>
+                  ) : null}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={startNewZone}
+                      className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/30"
+                    >
+                      Nueva zona
+                    </button>
+                    <button
+                      onClick={() => setDrawMode((prev) => !prev)}
+                      className={`rounded-full px-3 py-1 text-[11px] ${
+                        drawMode
+                          ? "bg-emerald-400/20 text-emerald-100"
+                          : "border border-white/10 text-white/70 hover:border-white/30"
+                      }`}
+                    >
+                      {drawMode ? "Dibujando..." : "Dibujar"}
+                    </button>
+                    <button
+                      onClick={undoZonePoint}
+                      disabled={drawingPoints.length === 0}
+                      className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/30 disabled:opacity-60"
+                    >
+                      Deshacer
+                    </button>
+                    <button
+                      onClick={clearZoneDrawing}
+                      disabled={drawingPoints.length === 0}
+                      className="rounded-full border border-white/10 px-3 py-1 text-[11px] text-white/70 hover:border-white/30 disabled:opacity-60"
+                    >
+                      Limpiar
+                    </button>
+                    <button
+                      onClick={saveZone}
+                      className="rounded-full bg-emerald-400/20 px-3 py-1 text-[11px] text-emerald-100 hover:bg-emerald-400/30"
+                    >
+                      Guardar zona
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-white/50">
+                    Click en el mapa para agregar puntos. Esc para salir.
+                  </p>
+                </div>
+
+                <div className="mt-4 space-y-2 border-t border-white/10 pt-3">
+                  {zones.length === 0 ? (
+                    <p className="text-xs text-white/50">
+                      No hay zonas creadas.
+                    </p>
+                  ) : (
+                    zones.map((zone) => {
+                      const isActive = zone.id === selectedZoneId;
+                      return (
+                        <div
+                          key={zone.id}
+                          className={`rounded-xl border px-3 py-2 text-xs ${
+                            isActive
+                              ? "border-white/40 bg-white/10"
+                              : "border-white/10 bg-white/5"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              onClick={() => setSelectedZoneId(zone.id)}
+                              className="flex items-center gap-2 text-left text-white/80"
+                            >
+                              <span
+                                className="h-3 w-3 rounded-full"
+                                style={{ background: zone.color }}
+                              />
+                              <span className="font-medium">{zone.name}</span>
+                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => startEditZone(zone)}
+                                className="rounded-full border border-white/10 px-2 py-1 text-[10px] text-white/60 hover:border-white/30"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                onClick={() => {
+                                  startEditZone(zone);
+                                  startRedraw();
+                                }}
+                                className="rounded-full border border-white/10 px-2 py-1 text-[10px] text-white/60 hover:border-white/30"
+                              >
+                                Redibujar
+                              </button>
+                              <button
+                                onClick={() => requestDeleteZone(zone)}
+                                className="rounded-full border border-white/10 px-2 py-1 text-[10px] text-rose-200 hover:border-rose-300/40"
+                              >
+                                Eliminar
+                              </button>
+                            </div>
+                          </div>
+                          {zone.notes ? (
+                            <p className="mt-2 text-[11px] text-white/50">
+                              {zone.notes}
+                            </p>
+                          ) : null}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setZonesPanelOpen(true);
+                  setShowRoutePanel(false);
+                }}
+                className="pointer-events-auto absolute right-6 top-16 flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white shadow-xl backdrop-blur"
+              >
+                <span className="material-symbols-rounded text-[18px]">
+                  polyline
+                </span>
+                Mostrar zonas
+              </button>
+            )}
           </div>
         </main>
       </div>
@@ -951,6 +1517,8 @@ export default function Home() {
         }}
         onSubmit={handleSubmit}
         saving={saving}
+        leaders={leaders}
+        pollingZones={pollingZones}
       />
 
       <DiscardModal
@@ -962,6 +1530,18 @@ export default function Home() {
           setPickMode(false);
           setIsFormDirty(false);
         }}
+      />
+
+      <ConfirmDeleteModal
+        isOpen={Boolean(zoneDeleteTarget)}
+        title="¿Eliminar zona?"
+        description={
+          zoneDeleteTarget?.name
+            ? `Se eliminará definitivamente la zona ${zoneDeleteTarget.name}.`
+            : "Esta acción no se puede deshacer."
+        }
+        onCancel={() => setZoneDeleteTarget(null)}
+        onConfirm={confirmDeleteZone}
       />
     </div>
   );
