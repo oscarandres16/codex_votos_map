@@ -8,7 +8,7 @@ import type { PollingZone } from "@/lib/polling-zones";
 import { POLLING_ZONES_KEY } from "@/lib/polling-zones";
 import type { Map as LeafletMap } from "leaflet";
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { DiscardModal } from "@/components/modals/DiscardModal";
 import { ConfirmDeleteModal } from "@/components/modals/ConfirmDeleteModal";
@@ -59,7 +59,6 @@ const priorityStyles: Record<VoterPriority, string> = {
 };
 
 export default function Home() {
-  const searchParams = useSearchParams();
   const mapLayers = [
     {
       id: "standard",
@@ -525,35 +524,6 @@ export default function Home() {
     setZoneDeleteTarget(null);
   };
 
-  const lastZoneParamRef = useRef<string | null>(null);
-  const pendingZoneActionRef = useRef<{ id: string; mode: string | null } | null>(
-    null,
-  );
-
-  useEffect(() => {
-    const zoneId = searchParams.get("zoneId");
-    const mode = searchParams.get("zoneMode");
-    if (!zoneId) return;
-    const key = `${zoneId}:${mode ?? ""}`;
-    if (lastZoneParamRef.current === key) return;
-    pendingZoneActionRef.current = { id: zoneId, mode };
-  }, [searchParams]);
-
-  useEffect(() => {
-    if (!pendingZoneActionRef.current) return;
-    const { id, mode } = pendingZoneActionRef.current;
-    const target = zones.find((zone) => zone.id === id);
-    if (!target) return;
-    const key = `${id}:${mode ?? ""}`;
-    lastZoneParamRef.current = key;
-    pendingZoneActionRef.current = null;
-    setZonesPanelOpen(true);
-    setShowRoutePanel(false);
-    setSelectedZoneId(target.id);
-    if (mode === "edit") {
-      startEditZone(target);
-    }
-  }, [zones]);
 
   useEffect(() => {
     if (drawMode) {
@@ -1543,6 +1513,62 @@ export default function Home() {
         onCancel={() => setZoneDeleteTarget(null)}
         onConfirm={confirmDeleteZone}
       />
+
+      <Suspense fallback={null}>
+        <ZoneParamSync
+          zones={zones}
+          onSelectZone={setSelectedZoneId}
+          onShowZones={() => {
+            setZonesPanelOpen(true);
+            setShowRoutePanel(false);
+          }}
+          onEditZone={startEditZone}
+        />
+      </Suspense>
     </div>
   );
+}
+
+function ZoneParamSync({
+  zones,
+  onSelectZone,
+  onShowZones,
+  onEditZone,
+}: {
+  zones: Zone[];
+  onSelectZone: (id: string) => void;
+  onShowZones: () => void;
+  onEditZone: (zone: Zone) => void;
+}) {
+  const searchParams = useSearchParams();
+  const lastZoneParamRef = useRef<string | null>(null);
+  const pendingZoneActionRef = useRef<{ id: string; mode: string | null } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const zoneId = searchParams.get("zoneId");
+    const mode = searchParams.get("zoneMode");
+    if (!zoneId) return;
+    const key = `${zoneId}:${mode ?? ""}`;
+    if (lastZoneParamRef.current === key) return;
+    pendingZoneActionRef.current = { id: zoneId, mode };
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!pendingZoneActionRef.current) return;
+    const { id, mode } = pendingZoneActionRef.current;
+    const target = zones.find((zone) => zone.id === id);
+    if (!target) return;
+    const key = `${id}:${mode ?? ""}`;
+    lastZoneParamRef.current = key;
+    pendingZoneActionRef.current = null;
+    onShowZones();
+    onSelectZone(target.id);
+    if (mode === "edit") {
+      onEditZone(target);
+    }
+  }, [zones, onShowZones, onSelectZone, onEditZone]);
+
+  return null;
 }
